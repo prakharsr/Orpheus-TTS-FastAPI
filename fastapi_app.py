@@ -829,7 +829,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "fastapi_main:app",
         host="0.0.0.0",
-        port=1234,
+        port=8880,
         reload=False,
         log_level="info",
         timeout_keep_alive=3600,  # Keep connection alive for 5 minutes

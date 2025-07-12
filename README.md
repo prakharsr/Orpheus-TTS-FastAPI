@@ -45,7 +45,7 @@ A high-performance FastAPI-based server that provides OpenAI-compatible Text-to-
 
 ### Interactive Documentation
 
-- **Swagger UI**: `http://localhost:1234/docs`
+- **Swagger UI**: `http://localhost:8880/docs`
 
 ## 🛠️ Installation
 
@@ -95,10 +95,10 @@ cp .env.sample .env
 ### Starting the Server
 
 ```bash
-uvicorn fastapi_app:app --host 0.0.0.0 --port 1234
+uvicorn fastapi_app:app --host 0.0.0.0 --port 8880
 ```
 
-The server will start on `http://localhost:1234` by default.
+The server will start on `http://localhost:8880` by default.
 
 ### Making Requests
 
@@ -106,7 +106,7 @@ The server will start on `http://localhost:1234` by default.
 
 ```bash
 # Generate speech
-curl -X POST "http://localhost:1234/v1/audio/speech" \
+curl -X POST "http://localhost:8880/v1/audio/speech" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "orpheus",
@@ -124,7 +124,7 @@ curl -X POST "http://localhost:1234/v1/audio/speech" \
 import requests
 
 response = requests.post(
-    "http://localhost:1234/v1/audio/speech",
+    "http://localhost:8880/v1/audio/speech",
     json={
         "model": "orpheus",
         "input": "Hello, this is a test!",
@@ -146,7 +146,7 @@ from openai import OpenAI
 # Configure client to use local server
 client = OpenAI(
     api_key="dummy-key",  # Not validated by local server
-    base_url="http://localhost:1234"
+    base_url="http://localhost:8880"
 )
 
 response = client.audio.speech.create(
