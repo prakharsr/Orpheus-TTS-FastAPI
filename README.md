@@ -9,6 +9,7 @@ A high-performance FastAPI-based server that provides OpenAI-compatible Text-to-
 - **Direct vLLM Integration**: Uses vLLM's AsyncLLMEngine for optimal performance
 - **Text Chunking**: Automatic intelligent text splitting for long content
 - **Streaming Audio**: Real-time audio streaming with proper WAV headers
+- **Intelligent Retry Logic**: Automatic retry on audio decoding errors for improved reliability
 
 ## 🔧 Architecture
 
@@ -21,7 +22,7 @@ A high-performance FastAPI-based server that provides OpenAI-compatible Text-to-
 ├─────────────────────────────────────────────────┤
 │ Parallel Token Generation (vLLM AsyncEngine)    │
 ├─────────────────────────────────────────────────┤
-│ Token Decoding (Thread Pool)                    │
+│ Token Decoding (Async)                    │
 ├─────────────────────────────────────────────────┤
 │ Audio File Generation (Async I/O)               │
 └─────────────────────────────────────────────────┘
@@ -245,11 +246,10 @@ This project follows the same license as the original Orpheus TTS repository.
 2. **Out of Memory Errors**
    - Reduce `TTS_GPU_MEMORY_UTILIZATION` (try 0.8 or 0.7)
    - Decrease `TTS_MAX_MODEL_LEN` (try 6144 or 4096)
-   - Lower `TTS_MAX_WORKERS` (try 4-8)
    - Switch to `TTS_DTYPE="float16"` for lower VRAM usage
 
 3. **Slow Performance**
-   - Increase `TTS_MAX_WORKERS` (try 12-16)
+   - Increase `TTS_MAX_WORKERS` (try 16+)
    - Ensure GPU is being used (`nvidia-smi`)
    - Check if text is being chunked properly
    - Verify `TTS_GPU_MEMORY_UTILIZATION` isn't too low
