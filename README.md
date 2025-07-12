@@ -51,15 +51,27 @@ A high-performance FastAPI-based server that provides OpenAI-compatible Text-to-
 
 ### Prerequisites
 
-- Python 3.12
 - CUDA-capable GPU (minimum 16GB VRAM recommended)
 - Sufficient disk space for model downloads
 
 ### Install Dependencies
 
+1. Install uv 
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+2. Create a virtual environment with Python 3.12:
+```bash
+uv venv --python 3.12
+```
+3. Activate the virtual environment:
+```bash
+source .venv/bin/activate
+```
+4. Install dependencies
 ```bash
 # Install the required packages
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 ```
 
 ## 🔧 Configuration
@@ -172,10 +184,10 @@ Generate speech from text with automatic parallel processing for long texts.
   "speed": 1.0,              // Speech speed (0.25 to 4.0)
   
   // Optional: Override environment defaults for sampling
-  "temperature": 0.3,         // Sampling temperature (0.0-2.0, optional)
-  "top_p": 0.8,              // Top-p nucleus sampling (0.0-1.0, optional)
-  "repetition_penalty": 1.2,  // Repetition penalty (0.5-2.0, optional)
-  "max_tokens": 2048         // Maximum tokens to generate (100-8192, optional)
+  "temperature": 0.2,         // Sampling temperature (0.0-1.0, optional)
+  "top_p": 0.9,              // Top-p nucleus sampling (0.0-1.0, optional)
+  "repetition_penalty": 1.1,  // Repetition penalty (0.5-2.0, optional)
+  "max_tokens": 4096         // Maximum tokens to generate (100-8192, optional)
 }
 ```
 
