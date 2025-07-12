@@ -73,6 +73,11 @@ source .venv/bin/activate
 # Install the required packages
 uv pip install -r requirements.txt
 ```
+5. Get access to the Orpheus model from [here](https://huggingface.co/canopylabs/orpheus-3b-0.1-ft)
+6. Login to Huggingface using the CLI after gaining access to the repo
+```bash
+huggingface-cli login
+```
 
 ## 🔧 Configuration
 
