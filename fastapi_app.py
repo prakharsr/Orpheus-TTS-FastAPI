@@ -20,7 +20,7 @@ os.environ["VLLM_USE_V1"] = "0"
 
 from orpheus_tts import OrpheusModel
 from vllm import AsyncEngineArgs, AsyncLLMEngine
-from python_dotenv import load_dotenv
+from dotenv import load_dotenv
 
 load_dotenv()
 
