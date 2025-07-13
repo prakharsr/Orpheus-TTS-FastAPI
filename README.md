@@ -8,7 +8,7 @@ A high-performance FastAPI-based server that provides OpenAI-compatible Text-to-
 - **Async Parallel Processing**: Process multiple text chunks simultaneously for faster generation
 - **Direct vLLM Integration**: Uses vLLM's AsyncLLMEngine for optimal performance
 - **Text Chunking**: Automatic intelligent text splitting for long content
-- **Streaming Audio**: Real-time audio streaming with proper WAV headers
+- **Complete Audio Files**: Returns complete WAV files optimized for quality
 - **Intelligent Retry Logic**: Automatic retry on audio decoding errors for improved reliability
 - **Token Repetition Detection**: Prevents infinite audio loops with adaptive pattern detection and automatic retry with adjusted parameters
 
