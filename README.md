@@ -10,6 +10,7 @@ A high-performance FastAPI-based server that provides OpenAI-compatible Text-to-
 - **Text Chunking**: Automatic intelligent text splitting for long content
 - **Streaming Audio**: Real-time audio streaming with proper WAV headers
 - **Intelligent Retry Logic**: Automatic retry on audio decoding errors for improved reliability
+- **Token Repetition Detection**: Prevents infinite audio loops with adaptive pattern detection and automatic retry with adjusted parameters
 
 ## 🔧 Architecture
 
@@ -22,7 +23,9 @@ A high-performance FastAPI-based server that provides OpenAI-compatible Text-to-
 ├─────────────────────────────────────────────────┤
 │ Parallel Token Generation (vLLM AsyncEngine)    │
 ├─────────────────────────────────────────────────┤
-│ Token Decoding (Async)                    │
+│ Token Repetition Detection        │
+├─────────────────────────────────────────────────┤
+│ Token Decoding (Async)                          │
 ├─────────────────────────────────────────────────┤
 │ Audio File Generation (Async I/O)               │
 └─────────────────────────────────────────────────┘
@@ -33,6 +36,7 @@ A high-performance FastAPI-based server that provides OpenAI-compatible Text-to-
 - **Non-blocking operations** throughout the pipeline
 - **Better resource utilization** with optimized thread pools
 - **GPU memory monitoring** and automatic optimization
+- **Robust error handling** with token repetition detection to prevent infinite audio loops
 
 ## 📋 API Endpoints
 

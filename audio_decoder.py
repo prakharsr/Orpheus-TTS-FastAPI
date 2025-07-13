@@ -29,6 +29,10 @@ class TokenFormatError(AudioDecodingError):
     """Raised when tokens are not in the expected format"""
     pass
 
+class TokenRepetitionError(AudioDecodingError):
+    """Raised when repetitive token patterns are detected that cause audio artifacts"""
+    pass
+
 # Global SNAC model variable
 _snac_model = None
 _snac_device = None
@@ -151,6 +155,107 @@ def turn_token_into_id(token_string: str, index: int) -> int:
     else:
         logger.error(f"DEBUG: Token not in expected format: '{last_token}'")
         raise TokenFormatError(f"Token not in expected format: '{last_token}'")
+
+def check_token_repetition(tokens: list[str], max_tokens: int = 4096) -> None:
+    """
+    Check for repetitive token patterns that cause audio artifacts.
+    Uses adaptive detection based on the actual max_tokens limit and generation progress.
+    
+    Args:
+        tokens: List of raw token strings from the language model
+        max_tokens: Maximum tokens configured for generation
+        
+    Raises:
+        TokenRepetitionError: When repetitive patterns are detected
+    """
+    logger.debug(f"Checking {len(tokens)} tokens for repetition patterns (max_tokens: {max_tokens})")
+    
+    # Convert tokens to token IDs for pattern analysis
+    token_id_sequence = []
+    count = 0
+    
+    for token_string in tokens:
+        try:
+            token_id = turn_token_into_id(token_string, count)
+            if token_id > 0:
+                token_id_sequence.append(token_id)
+                count += 1
+        except (TokenParsingError, TokenFormatError):
+            # Skip invalid tokens, just like in tokens_decoder
+            continue
+    
+    logger.debug(f"Converted {len(token_id_sequence)} valid token IDs for repetition analysis")
+    
+    # Only check for repetition if we have a significant number of tokens
+    # Based on observation: repetition started around token 150, so check when we have >100 tokens
+    MIN_TOKENS_FOR_REPETITION_CHECK = max(100, max_tokens // 40)  # At least 100 or 2.5% of max_tokens
+    
+    if len(token_id_sequence) < MIN_TOKENS_FOR_REPETITION_CHECK:
+        logger.debug(f"Skipping repetition check: {len(token_id_sequence)} tokens < {MIN_TOKENS_FOR_REPETITION_CHECK} minimum")
+        return
+    
+    # Adaptive configuration based on max_tokens and current generation progress
+    generation_progress = len(token_id_sequence) / max_tokens
+    
+    # Dynamic pattern detection configuration based on max_tokens
+    # Scale pattern lengths with max_tokens to handle different environments
+    MIN_PATTERN_LENGTH = max(10, max_tokens // 400)     # 10 for 4096 tokens, scales up for larger limits
+    MAX_PATTERN_LENGTH = max(50, max_tokens // 80)      # 50 for 4096 tokens, scales up for larger limits
+    
+    # Ensure reasonable bounds
+    MIN_PATTERN_LENGTH = min(MIN_PATTERN_LENGTH, 50)    # Cap at 50 to avoid excessive computation
+    MAX_PATTERN_LENGTH = min(MAX_PATTERN_LENGTH, 200)   # Cap at 200 to avoid excessive computation
+    
+    # Look at a larger window for long generations (up to 50% of generation)
+    REPETITION_WINDOW = min(len(token_id_sequence), max(500, int(len(token_id_sequence) * 0.5)))
+    
+    # Adaptive repetition threshold based on generation progress and max_tokens
+    # Higher base thresholds for more conservative detection
+    base_threshold = max(8, max_tokens // 500)  # 8 for 4096 tokens, scales up for larger limits
+    
+    if generation_progress < 0.3:  # Early in generation
+        REPETITION_THRESHOLD = base_threshold + 5  # More conservative
+    elif generation_progress < 0.7:  # Mid generation
+        REPETITION_THRESHOLD = base_threshold + 2  # Moderate
+    else:  # Late in generation (likely approaching limit)
+        REPETITION_THRESHOLD = max(5, base_threshold - 2)  # More aggressive for late-stage
+    
+    logger.debug(f"Repetition detection config: window={REPETITION_WINDOW}, pattern_len={MIN_PATTERN_LENGTH}-{MAX_PATTERN_LENGTH}, threshold={REPETITION_THRESHOLD}, progress={generation_progress:.2%}, max_tokens={max_tokens}")
+    
+    # Check for repetition patterns
+    recent_tokens = token_id_sequence[-REPETITION_WINDOW:]
+    
+    # Check for repeating patterns of different lengths
+    for pattern_length in range(MIN_PATTERN_LENGTH, min(MAX_PATTERN_LENGTH + 1, REPETITION_WINDOW // 2 + 1)):
+        if len(recent_tokens) >= pattern_length * REPETITION_THRESHOLD:
+            # Extract the pattern from the end and check if it repeats
+            pattern = recent_tokens[-pattern_length:]
+            repetitions = 0
+            
+            # Count consecutive repetitions at the end
+            for i in range(len(recent_tokens) - pattern_length, -1, -pattern_length):
+                if i >= 0 and i + pattern_length <= len(recent_tokens):
+                    if recent_tokens[i:i + pattern_length] == pattern:
+                        repetitions += 1
+                    else:
+                        break
+            
+            if repetitions >= REPETITION_THRESHOLD:
+                logger.error(f"🔄 REPETITION DETECTED: Pattern length {pattern_length} repeated {repetitions} times")
+                logger.error(f"🔄 Pattern: {pattern}")
+                logger.error(f"🔄 Generation progress: {generation_progress:.1%} ({len(token_id_sequence)}/{max_tokens} tokens)")
+                logger.error(f"🔄 Recent token sequence: {token_id_sequence[-min(50, len(token_id_sequence)):]}")
+                raise TokenRepetitionError(f"Repetitive pattern detected: {pattern_length}-token pattern repeated {repetitions} times at {generation_progress:.1%} progress")
+    
+    # Check if we're close to max_tokens limit (likely repetition issue)
+    HIGH_TOKEN_THRESHOLD = 0.85  # 85% of max_tokens - catch earlier
+    if generation_progress > HIGH_TOKEN_THRESHOLD:
+        logger.error(f"🔄 APPROACHING TOKEN LIMIT: {len(token_id_sequence)} tokens ({generation_progress:.1%} of {max_tokens} max)")
+        logger.error(f"🔄 This likely indicates repetition causing excessive generation")
+        logger.error(f"🔄 Recent token IDs: {token_id_sequence[-30:]}")
+        raise TokenRepetitionError(f"Approaching token limit: {len(token_id_sequence)} tokens ({generation_progress:.1%} of max), likely repetition issue")
+    
+    logger.debug(f"No repetition patterns detected in {len(token_id_sequence)} tokens ({generation_progress:.1%} progress)")
 
 async def tokens_decoder(tokens: list[str]) -> AsyncGenerator[bytes, None]:
     """

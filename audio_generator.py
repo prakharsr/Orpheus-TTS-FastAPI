@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from orpheus_tts import OrpheusModel
 from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
-from audio_decoder import tokens_decoder, AudioDecodingError
+from audio_decoder import tokens_decoder, AudioDecodingError, TokenRepetitionError, check_token_repetition
 
 logger = logging.getLogger(__name__)
 
@@ -99,13 +99,18 @@ async def generate_speech_tokens_with_retry(engine, prompt: str, voice: str, req
     """Generate speech tokens with retry logic for audio decoding errors"""
     
     last_error = None
+    current_repetition_penalty = repetition_penalty  # Track current penalty for adjustments
     
     for attempt in range(MAX_RETRIES):
         try:
             # Generate tokens using async engine
             tokens = await generate_tokens_async(engine, prompt, voice, request_id, 
-                                               temperature, top_p, repetition_penalty, max_tokens,
+                                               temperature, top_p, current_repetition_penalty, max_tokens,
                                                default_temperature, default_top_p, default_repetition_penalty, default_max_tokens)
+            
+            # Check for repetition patterns BEFORE audio generation (lightweight step)
+            effective_max_tokens = max_tokens if max_tokens is not None else default_max_tokens
+            check_token_repetition(tokens, effective_max_tokens)
             
             # Try to decode tokens to audio chunks
             audio_chunks = []
@@ -133,6 +138,25 @@ async def generate_speech_tokens_with_retry(engine, prompt: str, voice: str, req
             
             return audio_chunks, metadata
             
+        except TokenRepetitionError as e:
+            last_error = e
+            logger.error(f"🔄 Token repetition detected on attempt {attempt + 1}/{MAX_RETRIES} for request_id: {request_id}: {e}")
+            
+            if attempt < MAX_RETRIES - 1:  # Not the last attempt
+                # For repetition errors, we might want to adjust sampling parameters
+                logger.info(f"⏳ Retrying with adjusted parameters in {RETRY_DELAY} seconds...")
+                
+                # Increase repetition penalty for retry attempts
+                if current_repetition_penalty is None:
+                    current_repetition_penalty = default_repetition_penalty * (1.0 + 0.1 * (attempt + 1))  # Increase by 10% per retry
+                else:
+                    current_repetition_penalty = current_repetition_penalty * (1.0 + 0.1 * (attempt + 1))
+                
+                logger.info(f"🔧 Adjusted repetition penalty to {current_repetition_penalty:.2f} for retry")
+                await asyncio.sleep(RETRY_DELAY)
+            else:
+                logger.error(f"❌ All {MAX_RETRIES} attempts failed due to repetition for request_id: {request_id}")
+                
         except AudioDecodingError as e:
             last_error = e
             logger.info(f"🔄 Audio decoding failed on attempt {attempt + 1}/{MAX_RETRIES} for request_id: {request_id}: {e}")
@@ -149,7 +173,10 @@ async def generate_speech_tokens_with_retry(engine, prompt: str, voice: str, req
             raise
     
     # If we get here, all retries failed
-    raise AudioDecodingError(f"Token generation failed after {MAX_RETRIES} attempts. Last error: {last_error}")
+    if isinstance(last_error, TokenRepetitionError):
+        raise TokenRepetitionError(f"Token repetition persisted after {MAX_RETRIES} attempts. Last error: {last_error}")
+    else:
+        raise AudioDecodingError(f"Token generation failed after {MAX_RETRIES} attempts. Last error: {last_error}")
 
 async def generate_speech_tokens_direct(engine, prompt: str, voice: str, 
                                       temperature: Optional[float] = None, top_p: Optional[float] = None,
