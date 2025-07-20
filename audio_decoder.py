@@ -246,15 +246,7 @@ def check_token_repetition(tokens: list[str], max_tokens: int = 4096) -> None:
                 logger.error(f"🔄 Generation progress: {generation_progress:.1%} ({len(token_id_sequence)}/{max_tokens} tokens)")
                 logger.error(f"🔄 Recent token sequence: {token_id_sequence[-min(50, len(token_id_sequence)):]}")
                 raise TokenRepetitionError(f"Repetitive pattern detected: {pattern_length}-token pattern repeated {repetitions} times at {generation_progress:.1%} progress")
-    
-    # Check if we're close to max_tokens limit (likely repetition issue)
-    HIGH_TOKEN_THRESHOLD = 0.85  # 85% of max_tokens - catch earlier
-    if generation_progress > HIGH_TOKEN_THRESHOLD:
-        logger.error(f"🔄 APPROACHING TOKEN LIMIT: {len(token_id_sequence)} tokens ({generation_progress:.1%} of {max_tokens} max)")
-        logger.error(f"🔄 This likely indicates repetition causing excessive generation")
-        logger.error(f"🔄 Recent token IDs: {token_id_sequence[-30:]}")
-        raise TokenRepetitionError(f"Approaching token limit: {len(token_id_sequence)} tokens ({generation_progress:.1%} of max), likely repetition issue")
-    
+
     logger.debug(f"No repetition patterns detected in {len(token_id_sequence)} tokens ({generation_progress:.1%} progress)")
 
 async def tokens_decoder(tokens: list[str]) -> AsyncGenerator[bytes, None]:
