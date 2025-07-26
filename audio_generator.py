@@ -20,11 +20,13 @@ RETRY_DELAY = 1.0
 class OrpheusModelExtended(OrpheusModel):
     """Extended OrpheusModel with additional vLLM parameters"""
     
-    def __init__(self, model_name, dtype=torch.bfloat16, max_model_len=2048, tensor_parallel_size=1, gpu_memory_utilization=0.9):
+    def __init__(self, model_name, dtype=torch.bfloat16, max_model_len=2048, tensor_parallel_size=1, gpu_memory_utilization=0.9, enable_chunked_prefill=True, enable_prefix_caching=True):
         # Store additional parameters
         self.max_model_len = max_model_len
         self.tensor_parallel_size = tensor_parallel_size
         self.gpu_memory_utilization = gpu_memory_utilization
+        self.enable_chunked_prefill = enable_chunked_prefill
+        self.enable_prefix_caching = enable_prefix_caching
         
         # Call parent constructor with original parameters
         super().__init__(model_name, dtype)
@@ -43,11 +45,14 @@ class OrpheusModelExtended(OrpheusModel):
             vllm_dtype = "bfloat16"  # default fallback
         
         engine_args = AsyncEngineArgs(
+            enforce_eager=False,
             model=self.model_name,
             dtype=vllm_dtype,
             max_model_len=self.max_model_len,
             tensor_parallel_size=self.tensor_parallel_size,
-            gpu_memory_utilization=self.gpu_memory_utilization
+            gpu_memory_utilization=self.gpu_memory_utilization,
+            enable_chunked_prefill=self.enable_chunked_prefill,
+            enable_prefix_caching=self.enable_prefix_caching
         )
         return AsyncLLMEngine.from_engine_args(engine_args)
 
