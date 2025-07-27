@@ -23,7 +23,7 @@ A high-performance FastAPI-based server that provides OpenAI-compatible Text-to-
 ├─────────────────────────────────────────────────┤
 │ Parallel Token Generation (vLLM AsyncEngine)    │
 ├─────────────────────────────────────────────────┤
-│ Token Repetition Detection        │
+│ Token Repetition Detection                      │
 ├─────────────────────────────────────────────────┤
 │ Token Decoding (Async)                          │
 ├─────────────────────────────────────────────────┤
