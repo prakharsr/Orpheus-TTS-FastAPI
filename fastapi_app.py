@@ -155,7 +155,7 @@ async def timeout_middleware(request: Request, call_next):
     # Set extended timeout for TTS endpoints
     if request.url.path.startswith("/v1/audio/"):
         # For TTS endpoints, set a much longer timeout (10 minutes)
-        timeout = 3600.0
+        timeout = 600.0
     else:
         # For other endpoints, use default timeout (30 seconds)
         timeout = 30.0
@@ -419,5 +419,5 @@ if __name__ == "__main__":
         port=8880,
         reload=False,
         log_level="info",
-        timeout_keep_alive=3600,  # Keep connection alive for 1 hour
+        timeout_keep_alive=600,  # Keep connection alive for 10 minutes
     ) 
