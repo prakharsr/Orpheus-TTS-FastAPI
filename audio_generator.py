@@ -1,15 +1,17 @@
-import torch
 import asyncio
 import uuid
 import os
 import wave
 import logging
-from typing import Optional, Tuple, List, Dict, Literal
+from typing import Optional, Tuple, List, Dict
 from concurrent.futures import ThreadPoolExecutor
 
-from orpheus_tts import OrpheusModel
-from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
+from openai import AsyncOpenAI
+import torch
 from audio_decoder import tokens_decoder, AudioDecodingError, TokenRepetitionError, check_token_repetition
+from transformers import AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained("canopylabs/orpheus-tts-0.1-finetune-prod")
 
 logger = logging.getLogger(__name__)
 
@@ -17,59 +19,41 @@ logger = logging.getLogger(__name__)
 MAX_RETRIES = 5
 RETRY_DELAY = 1.0
 
-class OrpheusModelExtended(OrpheusModel):
-    """Extended OrpheusModel with additional vLLM parameters"""
+class OrpheusVLLMClient:
+    """Client for communicating with vLLM server running Orpheus model"""
     
-    def __init__(self, model_name, dtype=torch.bfloat16, max_model_len=2048, tensor_parallel_size=1, gpu_memory_utilization=0.9, enable_chunked_prefill=True, enable_prefix_caching=True):
-        # Store additional parameters
-        self.max_model_len = max_model_len
-        self.tensor_parallel_size = tensor_parallel_size
-        self.gpu_memory_utilization = gpu_memory_utilization
-        self.enable_chunked_prefill = enable_chunked_prefill
-        self.enable_prefix_caching = enable_prefix_caching
-        
-        # Call parent constructor with original parameters
-        super().__init__(model_name, dtype)
-    
-    def _setup_engine(self):
-        """Override to include additional vLLM parameters"""
-        # Map torch dtype to vLLM ModelDType literals
-        vllm_dtype: Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
-        if self.dtype == torch.bfloat16:
-            vllm_dtype = "bfloat16"
-        elif self.dtype == torch.float16:
-            vllm_dtype = "float16"
-        elif self.dtype == torch.float32:
-            vllm_dtype = "float32"
-        else:
-            vllm_dtype = "bfloat16"  # default fallback
-        
-        engine_args = AsyncEngineArgs(
-            enforce_eager=False,
-            model=self.model_name,
-            dtype=vllm_dtype,
-            max_model_len=self.max_model_len,
-            tensor_parallel_size=self.tensor_parallel_size,
-            gpu_memory_utilization=self.gpu_memory_utilization,
-            enable_chunked_prefill=self.enable_chunked_prefill,
-            enable_prefix_caching=self.enable_prefix_caching
+    def __init__(self, base_url: str, api_key: str, model_name: str = "orpheus"):
+        self.client = AsyncOpenAI(
+            base_url=base_url,
+            api_key=api_key
         )
-        return AsyncLLMEngine.from_engine_args(engine_args)
+        self.model_name = model_name
+        
+    async def health_check(self) -> bool:
+        """Check if the vLLM server is healthy"""
+        try:
+            # Try to list models as a health check
+            models = await self.client.models.list()
+            return len(models.data) > 0
+        except Exception as e:
+            logger.error(f"vLLM server health check failed: {e}")
+            return False
 
-async def generate_tokens_async(engine, prompt: str, voice: str, request_id: str, 
+async def generate_tokens_async(client: OrpheusVLLMClient, prompt: str, voice: str, request_id: str, 
                                temperature: Optional[float] = None, top_p: Optional[float] = None, 
                                repetition_penalty: Optional[float] = None, max_tokens: Optional[int] = None,
                                default_temperature: float = 0.2, default_top_p: float = 0.9,
                                default_repetition_penalty: float = 1.1, default_max_tokens: int = 4096) -> list[str]:
-    """Generate tokens using the async vLLM engine directly"""
+    """Generate tokens using the vLLM server via OpenAI API"""
     
     # Format prompt using the same logic as OrpheusModel
+    # Note: The tokenization and special tokens will be handled by the vLLM server
     adapted_prompt = f"{voice}: {prompt}"
-    prompt_tokens = engine.tokeniser(adapted_prompt, return_tensors="pt")
+    prompt_tokens = tokenizer(adapted_prompt, return_tensors="pt")
     start_token = torch.tensor([[128259]], dtype=torch.int64)
     end_tokens = torch.tensor([[128009, 128260, 128261, 128257]], dtype=torch.int64)
     all_input_ids = torch.cat([start_token, prompt_tokens.input_ids, end_tokens], dim=1)
-    prompt_string = engine.tokeniser.decode(all_input_ids[0])
+    prompt_string = tokenizer.decode(all_input_ids[0])
     
     # Use provided parameters or fall back to defaults
     temperature = temperature if temperature is not None else default_temperature
@@ -77,26 +61,40 @@ async def generate_tokens_async(engine, prompt: str, voice: str, request_id: str
     repetition_penalty = repetition_penalty if repetition_penalty is not None else default_repetition_penalty
     max_tokens = max_tokens if max_tokens is not None else default_max_tokens
     
-    # Set up sampling parameters with configurable values
-    sampling_params = SamplingParams(
-        temperature=temperature,
-        top_p=top_p,
-        max_tokens=max_tokens,
-        stop_token_ids=[128258],
-        repetition_penalty=repetition_penalty,
-    )
-    
     logger.debug(f"Using sampling params - temp: {temperature}, top_p: {top_p}, "
                 f"max_tokens: {max_tokens}, rep_penalty: {repetition_penalty}")
     
-    # Generate tokens using async engine
-    tokens = []
-    async for result in engine.engine.generate(prompt=prompt_string, sampling_params=sampling_params, request_id=request_id):
-        tokens.append(result.outputs[0].text)
-    
-    return tokens
+    # Create completion request
+    try:
+        completion = await client.client.completions.create(
+            model=client.model_name,
+            prompt=prompt_string,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            stream=False,
+            extra_body={
+                "repeat_penalty": repetition_penalty,
+                "repetition_penalty": repetition_penalty,
+                "stop_token_ids": [128258]
+            }
+        )
+        
+        # Extract the generated text
+        generated_text = completion.choices[0].text
+        split_tokens = generated_text.split(">")
+        all_tokens = []
+        for token in split_tokens:
+            if token.strip():
+                token_text = f'{token.strip()}>'
+                all_tokens.append(token_text)
+        return all_tokens  # Return as list to maintain compatibility
+        
+    except Exception as e:
+        logger.error(f"Error calling vLLM server for request {request_id}: {e}")
+        raise
 
-async def generate_speech_tokens_with_retry(engine, prompt: str, voice: str, request_id: str, 
+async def generate_speech_tokens_with_retry(client: OrpheusVLLMClient, prompt: str, voice: str, request_id: str, 
                                           temperature: Optional[float] = None, top_p: Optional[float] = None,
                                           repetition_penalty: Optional[float] = None, max_tokens: Optional[int] = None,
                                           default_temperature: float = 0.2, default_top_p: float = 0.9,
@@ -108,8 +106,8 @@ async def generate_speech_tokens_with_retry(engine, prompt: str, voice: str, req
     
     for attempt in range(MAX_RETRIES):
         try:
-            # Generate tokens using async engine
-            tokens = await generate_tokens_async(engine, prompt, voice, request_id, 
+            # Generate tokens using vLLM server
+            tokens = await generate_tokens_async(client, prompt, voice, request_id, 
                                                temperature, top_p, current_repetition_penalty, max_tokens,
                                                default_temperature, default_top_p, default_repetition_penalty, default_max_tokens)
             
@@ -183,12 +181,12 @@ async def generate_speech_tokens_with_retry(engine, prompt: str, voice: str, req
     else:
         raise AudioDecodingError(f"Token generation failed after {MAX_RETRIES} attempts. Last error: {last_error}")
 
-async def generate_speech_tokens_direct(engine, prompt: str, voice: str, 
+async def generate_speech_tokens_direct(client: OrpheusVLLMClient, prompt: str, voice: str, 
                                       temperature: Optional[float] = None, top_p: Optional[float] = None,
                                       repetition_penalty: Optional[float] = None, max_tokens: Optional[int] = None,
                                       default_temperature: float = 0.2, default_top_p: float = 0.9,
                                       default_repetition_penalty: float = 1.1, default_max_tokens: int = 4096) -> tuple[list[bytes], dict]:
-    """Generate speech tokens using direct async vLLM engine access with retry logic"""
+    """Generate speech tokens using vLLM server with retry logic"""
     try:
         # Generate unique request ID
         request_id = f"req-{uuid.uuid4().hex[:8]}"
@@ -197,7 +195,7 @@ async def generate_speech_tokens_direct(engine, prompt: str, voice: str,
         
         # Use retry logic
         audio_chunks, metadata = await generate_speech_tokens_with_retry(
-            engine, prompt, voice, request_id,
+            client, prompt, voice, request_id,
             temperature, top_p, repetition_penalty, max_tokens,
             default_temperature, default_top_p, default_repetition_penalty, default_max_tokens
         )
@@ -223,7 +221,7 @@ def combine_token_chunks(token_chunks_list: list[list[bytes]]) -> list[bytes]:
     # logger.info(f"Combined {len(token_chunks_list)} batches into {total_chunks} total chunks")
     return combined_chunks
 
-async def generate_speech_chunks(engine, text_chunks: list[str], voice: str, 
+async def generate_speech_chunks(client: OrpheusVLLMClient, text_chunks: list[str], voice: str, 
                                temperature: Optional[float] = None, top_p: Optional[float] = None,
                                repetition_penalty: Optional[float] = None, max_tokens: Optional[int] = None,
                                default_temperature: float = 0.2, default_top_p: float = 0.9,
@@ -253,7 +251,7 @@ async def generate_speech_chunks(engine, text_chunks: list[str], voice: str,
         
         # Each chunk gets its own retry logic
         task = generate_speech_tokens_with_retry(
-            engine, chunk, voice, request_id,
+            client, chunk, voice, request_id,
             temperature, top_p, repetition_penalty, max_tokens,
             default_temperature, default_top_p, default_repetition_penalty, default_max_tokens
         )

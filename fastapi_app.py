@@ -11,18 +11,14 @@ from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-import torch
+# torch import removed - no longer needed for direct vLLM usage
 import uvicorn
-
-# Force V0 engine to avoid async issues
-os.environ["VLLM_USE_V1"] = "0"
-
 from dotenv import load_dotenv
 
 # Import our new modules
 from audio_decoder import initialize_snac_model, shutdown_snac_model
 from audio_generator import (
-    OrpheusModelExtended, 
+    OrpheusVLLMClient, 
     generate_speech_tokens_direct, 
     generate_speech_chunks,
     tokens_to_audio_file
@@ -31,25 +27,18 @@ from text_processor import split_text_into_sentences, create_batches
 
 load_dotenv()
 
-def get_dtype_from_string(dtype_str: str) -> torch.dtype:
-    """Convert string to torch dtype"""
-    dtype_map = {
-        "bfloat16": torch.bfloat16,
-        "float16": torch.float16,
-        "float32": torch.float32,
-        "bf16": torch.bfloat16,  # alias
-        "fp16": torch.float16,  # alias
-        "fp32": torch.float32,  # alias
-    }
+def get_dtype_string(dtype_str: str) -> str:
+    """Validate and normalize dtype string"""
+    valid_dtypes = ["bfloat16", "float16", "float32", "bf16", "fp16", "fp32"]
     dtype_str = dtype_str.lower()
-    if dtype_str not in dtype_map:
+    if dtype_str not in valid_dtypes:
         logger.info(f"Unknown dtype '{dtype_str}', defaulting to bfloat16")
-        return torch.bfloat16
-    return dtype_map[dtype_str]
+        return "bfloat16"
+    return dtype_str
 
-# Model Configuration
+# Model Configuration (for vLLM server - these are informational/logging only)
 MODEL_NAME = os.getenv("TTS_MODEL_NAME", "canopylabs/orpheus-tts-0.1-finetune-prod")
-DTYPE = get_dtype_from_string(os.getenv("TTS_DTYPE", "bfloat16"))
+DTYPE = get_dtype_string(os.getenv("TTS_DTYPE", "bfloat16"))
 MAX_MODEL_LEN = int(os.getenv("TTS_MAX_MODEL_LEN", "8192"))
 TENSOR_PARALLEL_SIZE = int(os.getenv("TTS_TENSOR_PARALLEL_SIZE", "1"))
 GPU_MEMORY_UTILIZATION = float(os.getenv("TTS_GPU_MEMORY_UTILIZATION", "0.9"))
@@ -65,6 +54,11 @@ DEFAULT_TEMPERATURE = float(os.getenv("TTS_TEMPERATURE", "0.2"))
 DEFAULT_TOP_P = float(os.getenv("TTS_TOP_P", "0.9"))
 DEFAULT_REPETITION_PENALTY = float(os.getenv("TTS_REPETITION_PENALTY", "1.1"))
 DEFAULT_MAX_TOKENS = int(os.getenv("TTS_MAX_TOKENS", "4096"))
+
+# vLLM server configuration
+VLLM_SERVER_URL = os.getenv("VLLM_SERVER_URL", "http://localhost:8000/v1")
+VLLM_API_KEY = os.getenv("VLLM_API_KEY", "orpheus-tts-key")
+VLLM_MODEL_NAME = os.getenv("VLLM_MODEL_NAME", "orpheus")
 
 # Logging Configuration
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -87,33 +81,40 @@ logger.info(f"   Top P: {DEFAULT_TOP_P}")
 logger.info(f"   Repetition Penalty: {DEFAULT_REPETITION_PENALTY}")
 logger.info(f"   Max Tokens: {DEFAULT_MAX_TOKENS}")
 
-# Global engine variable
-engine = None
+# Global client and executor variables
+client = None
 executor = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan context manager for startup and shutdown events"""
     # Startup
-    logger.info("🚀 Loading Orpheus TTS model...")
-    global engine, executor
+    logger.info("🚀 Connecting to vLLM server...")
+    global client, executor
 
     # Load SNAC model for audio decoding
     initialize_snac_model(device=SNAC_DEVICE)
 
-    # Load Orpheus TTS model
-    engine = OrpheusModelExtended(
-        model_name=MODEL_NAME,
-        dtype=DTYPE,
-        max_model_len=MAX_MODEL_LEN,
-        tensor_parallel_size=TENSOR_PARALLEL_SIZE,
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION
+    print(f"VLLM_SERVER_URL: {VLLM_SERVER_URL}")
+    print(f"VLLM_API_KEY: {VLLM_API_KEY}")
+    print(f"VLLM_MODEL_NAME: {VLLM_MODEL_NAME}")
+    
+    # Initialize vLLM client
+    client = OrpheusVLLMClient(
+        base_url=VLLM_SERVER_URL,
+        api_key=VLLM_API_KEY,
+        model_name=VLLM_MODEL_NAME
     )
+    
+    # Health check for vLLM server
+    if not await client.health_check():
+        logger.error("❌ Failed to connect to vLLM server. Please ensure it's running.")
+        raise RuntimeError("vLLM server not available")
     
     # Create thread pool executor for file I/O only (no more token decoding)
     executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
     
-    logger.info("✅ Model loaded successfully!")
+    logger.info("✅ vLLM client connected successfully!")
     
     # Create outputs directory
     os.makedirs("outputs", exist_ok=True)
@@ -122,11 +123,11 @@ async def lifespan(app: FastAPI):
     yield
     
     # Shutdown
-    logger.info("🔄 Shutting down Orpheus TTS model...")
+    logger.info("🔄 Shutting down TTS service...")
     if executor:
         executor.shutdown(wait=True)
     shutdown_snac_model()
-    engine = None
+    client = None
     executor = None
     logger.info("✅ Shutdown complete!")
 
@@ -234,6 +235,21 @@ def cleanup_file(file_path: str) -> None:
     except Exception as e:
         logger.info(f"Failed to cleanup file {file_path}: {e}")
 
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    try:
+        if client is None:
+            return {"status": "unhealthy", "reason": "vLLM client not initialized"}
+        
+        server_healthy = await client.health_check()
+        if server_healthy:
+            return {"status": "healthy", "vllm_server": "connected"}
+        else:
+            return {"status": "unhealthy", "reason": "vLLM server not reachable"}
+    except Exception as e:
+        return {"status": "unhealthy", "reason": f"Health check failed: {str(e)}"}
+
 @app.post("/v1/audio/speech")
 async def create_speech(request: SpeechRequest, background_tasks: BackgroundTasks):
     """
@@ -285,7 +301,7 @@ async def create_speech(request: SpeechRequest, background_tasks: BackgroundTask
                 
                 # Generate tokens for all chunks and combine them
                 combined_tokens, metadata = await generate_speech_chunks(
-                    engine, batches, request.voice, 
+                    client, batches, request.voice, 
                     request.temperature, request.top_p, 
                     request.repetition_penalty, request.max_tokens,
                     DEFAULT_TEMPERATURE, DEFAULT_TOP_P, DEFAULT_REPETITION_PENALTY, DEFAULT_MAX_TOKENS
@@ -304,7 +320,7 @@ async def create_speech(request: SpeechRequest, background_tasks: BackgroundTask
             else:
                 # Single processing for shorter text using direct async access
                 token_chunks, metadata = await generate_speech_tokens_direct(
-                    engine, request.input, request.voice, 
+                    client, request.input, request.voice, 
                     request.temperature, request.top_p, 
                     request.repetition_penalty, request.max_tokens,
                     DEFAULT_TEMPERATURE, DEFAULT_TOP_P, DEFAULT_REPETITION_PENALTY, DEFAULT_MAX_TOKENS
