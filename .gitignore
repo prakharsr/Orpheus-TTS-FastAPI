@@ -1,3 +1,5 @@
 __pycache__
 outputs
+debug_audio_errors
+debug_audio_success
 .env
