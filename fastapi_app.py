@@ -53,6 +53,7 @@ DTYPE = get_dtype_from_string(os.getenv("TTS_DTYPE", "bfloat16"))
 MAX_MODEL_LEN = int(os.getenv("TTS_MAX_MODEL_LEN", "8192"))
 TENSOR_PARALLEL_SIZE = int(os.getenv("TTS_TENSOR_PARALLEL_SIZE", "1"))
 GPU_MEMORY_UTILIZATION = float(os.getenv("TTS_GPU_MEMORY_UTILIZATION", "0.9"))
+MAX_NUM_SEQS = int(os.getenv("TTS_MAX_NUM_SEQS", "32"))
 
 # Performance Configuration  
 MAX_WORKERS = int(os.getenv("TTS_MAX_WORKERS", "16"))
@@ -86,6 +87,7 @@ logger.info(f"   Temperature: {DEFAULT_TEMPERATURE}")
 logger.info(f"   Top P: {DEFAULT_TOP_P}")
 logger.info(f"   Repetition Penalty: {DEFAULT_REPETITION_PENALTY}")
 logger.info(f"   Max Tokens: {DEFAULT_MAX_TOKENS}")
+logger.info(f"   Max Num Sequences: {MAX_NUM_SEQS}")
 
 # Global engine variable
 engine = None
@@ -107,7 +109,8 @@ async def lifespan(app: FastAPI):
         dtype=DTYPE,
         max_model_len=MAX_MODEL_LEN,
         tensor_parallel_size=TENSOR_PARALLEL_SIZE,
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION
+        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
+        max_num_seqs=MAX_NUM_SEQS
     )
     
     # Create thread pool executor for file I/O only (no more token decoding)
@@ -118,6 +121,14 @@ async def lifespan(app: FastAPI):
     # Create outputs directory
     os.makedirs("outputs", exist_ok=True)
     logger.info("📁 Created outputs directory")
+    
+    # Create debug audio directory for edge case analysis
+    os.makedirs("debug_audio_errors", exist_ok=True)
+    logger.info("📁 Created debug_audio_errors directory for edge case logging")
+    
+    # Create success logging directory for debugging and parameter tuning
+    os.makedirs("debug_audio_success", exist_ok=True)
+    logger.info("📁 Created debug_audio_success directory for successful request logging")
     
     yield
     
@@ -288,7 +299,8 @@ async def create_speech(request: SpeechRequest, background_tasks: BackgroundTask
                     engine, batches, request.voice, 
                     request.temperature, request.top_p, 
                     request.repetition_penalty, request.max_tokens,
-                    DEFAULT_TEMPERATURE, DEFAULT_TOP_P, DEFAULT_REPETITION_PENALTY, DEFAULT_MAX_TOKENS
+                    DEFAULT_TEMPERATURE, DEFAULT_TOP_P, DEFAULT_REPETITION_PENALTY, DEFAULT_MAX_TOKENS,
+                    executor
                 )
 
                 # Convert combined tokens to audio file
@@ -307,7 +319,8 @@ async def create_speech(request: SpeechRequest, background_tasks: BackgroundTask
                     engine, request.input, request.voice, 
                     request.temperature, request.top_p, 
                     request.repetition_penalty, request.max_tokens,
-                    DEFAULT_TEMPERATURE, DEFAULT_TOP_P, DEFAULT_REPETITION_PENALTY, DEFAULT_MAX_TOKENS
+                    DEFAULT_TEMPERATURE, DEFAULT_TOP_P, DEFAULT_REPETITION_PENALTY, DEFAULT_MAX_TOKENS,
+                    executor
                 )
                 
                 # Convert tokens to audio file

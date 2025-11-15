@@ -3,10 +3,56 @@
 import torch
 import numpy as np
 import logging
+import statistics
+import re
+import os
 from typing import Optional, AsyncGenerator, Union
 from snac import SNAC
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Logging Configuration
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+# Setup logging
+logging.basicConfig(level=getattr(logging, LOG_LEVEL))
 logger = logging.getLogger(__name__)
+
+def normalize_and_count_words(text: str) -> int:
+    """
+    Normalize text and count actual words, handling various separators.
+    
+    Treats hyphens, underscores, pipes, slashes, and other separators as word boundaries.
+    Removes punctuation and extra whitespace.
+    
+    Examples:
+        "Hello world" -> 2 words
+        "-INSULT-ALBUS-DUMBLEDORE-" -> 3 words (INSULT, ALBUS, DUMBLEDORE)
+        "hello_world_test" -> 3 words
+        "a/b/c" -> 3 words
+    
+    Args:
+        text: Input text
+        
+    Returns:
+        int: Number of actual words
+    """
+    if not text or not text.strip():
+        return 0
+    
+    # Replace common separators with spaces
+    # This includes: hyphens, underscores, pipes, slashes, etc.
+    normalized = re.sub(r'[-_|/\\]+', ' ', text)
+    
+    # Remove other punctuation and special characters
+    normalized = re.sub(r'[^\w\s]', ' ', normalized)
+    
+    # Split by whitespace and filter out empty strings
+    words = [word for word in normalized.split() if word.strip()]
+    
+    return len(words)
 
 # Custom exceptions for audio decoding errors
 class AudioDecodingError(Exception):
@@ -31,6 +77,14 @@ class TokenFormatError(AudioDecodingError):
 
 class TokenRepetitionError(AudioDecodingError):
     """Raised when repetitive token patterns are detected that cause audio artifacts"""
+    pass
+
+class AudioDurationOutlierError(AudioDecodingError):
+    """Raised when audio duration is an outlier for the given text length"""
+    pass
+
+class TokenCountOutlierError(AudioDecodingError):
+    """Raised when token count is suspiciously high relative to input text length"""
     pass
 
 # Global SNAC model variable
@@ -248,6 +302,163 @@ def check_token_repetition(tokens: list[str], max_tokens: int = 4096) -> None:
                 raise TokenRepetitionError(f"Repetitive pattern detected: {pattern_length}-token pattern repeated {repetitions} times at {generation_progress:.1%} progress")
 
     logger.debug(f"No repetition patterns detected in {len(token_id_sequence)} tokens ({generation_progress:.1%} progress)")
+
+def check_token_count_ratio(tokens: list[str], input_text: str, max_tokens: int) -> dict:
+    """
+    Check if token count is suspiciously high relative to input text.
+    Returns a dict with check results and metrics for logging.
+    
+    Args:
+        tokens: List of raw token strings from the language model
+        input_text: The original input text
+        max_tokens: Maximum tokens configured for generation
+        
+    Returns:
+        dict: Metrics including is_outlier, token_count, word_count, ratio, etc.
+        
+    Raises:
+        TokenRepetitionError: When token count is suspiciously high
+    """
+    word_count = normalize_and_count_words(input_text)
+    token_count = len(tokens)
+    
+    # Typically, each word generates roughly 10-50 tokens (7 per frame, multiple frames per phoneme)
+    # If we're generating way more than expected, something might be wrong
+    EXPECTED_TOKENS_PER_WORD = 50  # Conservative estimate
+    MAX_RATIO_MULTIPLIER = 3.0  # Allow 3x the expected
+    
+    # For very short texts (1-5 words), be much more lenient
+    # Short utterances with punctuation can legitimately generate more tokens
+    if word_count <= 5:
+        MAX_RATIO_MULTIPLIER = 10.0  # Very lenient for short texts
+    elif word_count <= 10:
+        MAX_RATIO_MULTIPLIER = 6.0  # More lenient for short texts
+    
+    max_expected_tokens = word_count * EXPECTED_TOKENS_PER_WORD * MAX_RATIO_MULTIPLIER
+    tokens_per_word = token_count / word_count if word_count > 0 else 0
+    
+    # Also check if we're hitting the max_tokens limit (often indicates repetition loop)
+    token_limit_threshold = max_tokens * 0.95  # 95% of limit
+    is_near_limit = token_count > token_limit_threshold
+    is_ratio_outlier = token_count > max_expected_tokens
+    
+    metrics = {
+        "token_count": token_count,
+        "word_count": word_count,
+        "tokens_per_word": round(tokens_per_word, 2),
+        "max_expected_tokens": int(max_expected_tokens),
+        "is_ratio_outlier": is_ratio_outlier,
+        "is_near_limit": is_near_limit,
+        "max_tokens": max_tokens,
+        "limit_usage_percent": round((token_count / max_tokens) * 100, 2) if max_tokens > 0 else 0
+    }
+    
+    if is_ratio_outlier:
+        logger.error(f"⚠️ Token count outlier: {token_count} tokens for {word_count} words "
+                    f"(ratio: {tokens_per_word:.1f} tokens/word, expected max: {max_expected_tokens:.0f})")
+        raise TokenCountOutlierError(
+            f"Token count {token_count} exceeds expected {max_expected_tokens:.0f} "
+            f"for {word_count} words (ratio: {tokens_per_word:.1f} tokens/word)"
+        )
+    
+    if is_near_limit:
+        logger.warning(
+            f"⚠️ Token generation hit {token_count}/{max_tokens} tokens "
+            f"({metrics['limit_usage_percent']:.1f}% of limit) - possible repetition loop"
+        )
+    
+    logger.debug(f"Token count check passed: {token_count} tokens, {tokens_per_word:.1f} tokens/word")
+    return metrics
+
+def check_token_variance(tokens: list[str], window_size: int = 100) -> dict:
+    """
+    Check if recent tokens have suspiciously low variance (indicating repetition).
+    Returns a dict with check results and metrics for logging.
+    
+    Args:
+        tokens: List of raw token strings from the language model
+        window_size: Number of recent tokens to analyze
+        
+    Returns:
+        dict: Metrics including variance, mean, coefficient_of_variation, is_low_variance
+        
+    Raises:
+        TokenRepetitionError: When token variance is suspiciously low
+    """
+    metrics = {
+        "window_size": window_size,
+        "tokens_analyzed": 0,
+        "variance": 0,
+        "mean": 0,
+        "std_dev": 0,
+        "coefficient_of_variation": 0,
+        "is_low_variance": False,
+        "unique_tokens_ratio": 0
+    }
+    
+    if len(tokens) < window_size:
+        logger.debug(f"Skipping variance check: {len(tokens)} tokens < {window_size} window size")
+        return metrics
+    
+    # Convert recent tokens to IDs
+    recent_token_ids = []
+    count = 0
+    for token in tokens[-window_size:]:
+        try:
+            token_id = turn_token_into_id(token, count)
+            if token_id > 0:
+                recent_token_ids.append(token_id)
+                count += 1
+        except (TokenParsingError, TokenFormatError):
+            continue
+    
+    if len(recent_token_ids) < 50:
+        logger.debug(f"Skipping variance check: only {len(recent_token_ids)} valid tokens")
+        return metrics
+    
+    # Calculate variance and other statistics
+    variance = statistics.variance(recent_token_ids)
+    mean = statistics.mean(recent_token_ids)
+    std_dev = statistics.stdev(recent_token_ids)
+    
+    # Coefficient of variation (normalized std dev)
+    coefficient_of_variation = std_dev / mean if mean > 0 else 0
+    
+    # Check unique token ratio
+    unique_tokens = len(set(recent_token_ids))
+    unique_ratio = unique_tokens / len(recent_token_ids)
+    
+    metrics.update({
+        "tokens_analyzed": len(recent_token_ids),
+        "variance": round(variance, 2),
+        "mean": round(mean, 2),
+        "std_dev": round(std_dev, 2),
+        "coefficient_of_variation": round(coefficient_of_variation, 3),
+        "unique_tokens": unique_tokens,
+        "unique_tokens_ratio": round(unique_ratio, 3)
+    })
+    
+    # Low variance relative to range indicates repetition
+    # Token IDs are 0-4096, so we'd expect decent variance
+    LOW_CV_THRESHOLD = 0.15  # Very low variation
+    LOW_UNIQUE_RATIO_THRESHOLD = 0.20  # Less than 20% unique tokens
+    
+    is_low_variance = coefficient_of_variation < LOW_CV_THRESHOLD or unique_ratio < LOW_UNIQUE_RATIO_THRESHOLD
+    metrics["is_low_variance"] = is_low_variance
+    
+    if is_low_variance:
+        logger.warning(
+            f"⚠️ Low token variance detected: CV={coefficient_of_variation:.3f}, "
+            f"unique_ratio={unique_ratio:.3f}, variance={variance:.1f}, mean={mean:.1f}"
+        )
+        # For now, just log warning - could make this raise error if too many false positives
+        # raise TokenRepetitionError(
+        #     f"Low token variance detected: CV={coefficient_of_variation:.3f}, "
+        #     f"unique_ratio={unique_ratio:.3f}"
+        # )
+    
+    logger.debug(f"Token variance check: CV={coefficient_of_variation:.3f}, unique_ratio={unique_ratio:.3f}")
+    return metrics
 
 async def tokens_decoder(tokens: list[str]) -> AsyncGenerator[bytes, None]:
     """

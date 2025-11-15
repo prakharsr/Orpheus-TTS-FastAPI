@@ -1,6 +1,15 @@
 import re
 import logging
+import os
+from dotenv import load_dotenv
 
+load_dotenv()
+
+# Logging Configuration
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+# Setup logging
+logging.basicConfig(level=getattr(logging, LOG_LEVEL))
 logger = logging.getLogger(__name__)
 
 def split_text_into_sentences(text):
