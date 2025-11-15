@@ -33,6 +33,7 @@ frozenlist==1.8.0
 fsspec==2025.10.0
 gguf==0.17.1
 h11==0.16.0
+hf-transfer==0.1.9
 hf-xet==1.2.0
 httpcore==1.0.9
 httptools==0.7.1
